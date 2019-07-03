@@ -20,7 +20,7 @@ import jax.numpy as np
 from jax import jit, vmap
 from jax import random
 import matplotlib.pyplot as plt
-import fixed_point_finder.utils as utils
+import utils as utils
 
 
 def build_input_and_target_binary_decision(input_params, key):

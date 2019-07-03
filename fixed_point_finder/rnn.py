@@ -28,7 +28,7 @@ from jax.experimental import optimizers
 import matplotlib.pyplot as plt
 import numpy as onp  # original CPU-backed NumPy
 
-import fixed_point_finder.utils as utils
+import utils as utils
 
 MAX_SEED_INT = 10000000
 
@@ -51,15 +51,15 @@ def gru_params(key, **rnn_hps):
   u = rnn_hps['u']              # input
   n = rnn_hps['n']              # hidden
   o = rnn_hps['o']              # output
-  
+
   ifactor = rnn_hps['i_factor'] / np.sqrt(u)
   hfactor = rnn_hps['h_factor'] / np.sqrt(n)
   hscale = rnn_hps['h_scale']
-  
+
   wRUH = random.normal(next(skeys), (n+n,n)) * hfactor
   wRUX = random.normal(next(skeys), (n+n,u)) * ifactor
   wRUHX = np.concatenate([wRUH, wRUX], axis=1)
-  
+
   wCH = random.normal(next(skeys), (n,n)) * hfactor
   wCX = random.normal(next(skeys), (n,u)) * ifactor
   wCHX = np.concatenate([wCH, wCX], axis=1)
@@ -83,7 +83,7 @@ def sigmoid(x):
   return 0.5 * (np.tanh(x / 2.) + 1)
 
 
-def gru(params, h, x, bfg=0.5):
+def gru(params, h, x, bfg=0.0):
   """Implement the GRU equations.
 
   Arguments:
@@ -102,12 +102,68 @@ def gru(params, h, x, bfg=0.5):
   c = np.tanh(np.dot(params['wCHX'], rhx) + params['bC'] + bfg)
   return u * h + (1.0 - u) * c
 
+def gru_torch(params, state, x_t):
+    """Implement the GRU equations.
+
+    Arguments:
+    params: dictionary of GRU parameters
+    h: np array of  hidden state
+    x: np array of input
+    bfg: bias on forget gate (useful for learning if > 0.0)
+
+    Returns:
+    np array of hidden state after GRU update"""
+
+    z = sigmoid(np.dot(x_t, params['Wz']) +
+                 np.dot(state, params['Uz']) + params['bz'])
+
+    r = sigmoid(np.dot(x_t, params['Wr']) +
+             np.dot(state, params['Ur']) + params['br'])
+
+    h_twiddle = np.tanh(np.dot(x_t, params['Wh']) +
+                  np.dot(r * state, params['Uh']) + params['bh'])
+
+    state = (1 - z) * state + z * h_twiddle
+    return state
+
+
+def delete(x):
+    x.delete()
+
+def lstm_torch(params, state, x_t):
+    """Implement the GRU equations.
+
+    Arguments:
+    params: dictionary of GRU parameters
+    h: np array of  hidden state
+    x: np array of input
+    bfg: bias on forget gate (useful for learning if > 0.0)
+
+    Returns:
+    np array of hidden state after GRU update"""
+    w = params['w']
+    b = params['b']
+
+    h_tm1, c_tm1 = np.split(state, 2)
+    args = np.concatenate((x_t,h_tm1))
+
+    out = np.matmul(args, w) + b
+
+    i, j, f, o = np.split(out, 4)
+
+    g = np.tanh(j)
+    sigmoid_f = sigmoid(f + 1.)
+    c_t = np.multiply(c_tm1, sigmoid_f) + np.multiply(sigmoid(i) ,g)
+    h_t = np.multiply(np.tanh(c_t),sigmoid(o))
+
+    return np.concatenate((h_t, c_t))
+
 
 
 def affine(params, x):
   """Implement y = w x + b
 
-  Args: 
+  Args:
     params: dictionary of affine parameters
     x: np array of input"""
   return np.dot(params['wO'], x) + params['bO']
@@ -123,23 +179,23 @@ batch_affine = vmap(affine, in_axes=(None, 0))
 
 def gru_run(params, x_t):
   """Run the Vanilla RNN T steps, where T is shape[0] of input.
-  
+
   Args:
     params: dict of GRU parameters
     x_t: np array of inputs with dim ntime x u
 
-  Returns: 
+  Returns:
     2-tuple of np arrays (hidden states w dim ntime x n, outputs w dim ntim x o)
   """
-  
+
   # per-example predictions
-  h = params['h0']  
+  h = params['h0']
   h_t = []
   for x in x_t:
     h = gru(params, h, x)
     h_t.append(h)
-    
-  h_t = np.array(h_t)  
+
+  h_t = np.array(h_t)
   o_t = batch_affine(params, h_t)
   return h_t, o_t
 
@@ -152,7 +208,7 @@ def gru_run_with_h0(params, x_t, h0):
     x_t: np array of inputs with dim ntime x u
     h0: initial condition for hidden state
 
-  Returns: 
+  Returns:
     2-tuple of np arrays (hidden states w dim ntime x n, outputs w dim ntim x o)
   """
 
@@ -161,28 +217,28 @@ def gru_run_with_h0(params, x_t, h0):
   for x in x_t:
     h = gru(params, h, x)
     h_t.append(h)
-    
-  h_t = np.array(h_t)  
+
+  h_t = np.array(h_t)
   o_t = batch_affine(params, h_t)
   return h_t, o_t
 
-  
+
 # Let's upgrade it to handle batches using `vmap`
 # Make a batched version of the `predict` function
 batched_rnn_run = vmap(gru_run, in_axes=(None, 0))
 batched_rnn_run_w_h0 = vmap(gru_run_with_h0, in_axes=(None, 0, 0))
-  
-  
+
+
 def loss(params, inputs_bxtxu, targets_bxtxo, targets_mask_t, l2reg):
   """Compute the least squares loss of the output, plus L2 regularization.
 
-  Args: 
+  Args:
     params: dict RNN parameters
     inputs_bxtxu: np array of inputs batch x time x input dim
     targets_bxtxo: np array of targets batx x time x output dim
     targets_mask_t: list of time indices where target is active
     l2reg: float, hyper parameter controlling strength of L2 regularization
-  
+
   Returns:
     dict of losses
   """
@@ -199,7 +255,7 @@ def update_w_gc(i, opt_state, opt_update, get_params,
                 x_bxt, f_bxt, f_mask_bxt, max_grad_norm, l2reg):
   """Update the parameters w/ gradient clipped, gradient descent updates.
 
-  Arguments: 
+  Arguments:
     i: batch number
     opt_state: parameters plus optimizer state
     opt_update: optimizer state update function
@@ -209,16 +265,16 @@ def update_w_gc(i, opt_state, opt_update, get_params,
     f_mask_bxt: masks for when target is defined
     max_grad_norm: maximum norm value gradient is allowed to take
     l2reg: l2 regularization hyperparameter
-  
-  Returns: 
-    opt_state tuple (as above) that includes updated parameters and optimzier 
+
+  Returns:
+    opt_state tuple (as above) that includes updated parameters and optimzier
       state.
   """
   params = get_params(opt_state)
 
   def training_loss(params, x_bxt, f_bxt, l2reg):
     return loss(params, x_bxt, f_bxt, f_mask_bxt, l2reg)['total']
-  
+
   grads = grad(training_loss)(params, x_bxt, f_bxt, l2reg)
   clipped_grads = optimizers.clip_grads(grads, max_grad_norm)
   return opt_update(i, clipped_grads, opt_state)
@@ -230,21 +286,21 @@ update_w_gc_jit = jit(update_w_gc, static_argnums=(2,3))
 
 def run_trials(batched_run_fun, io_fun, nbatches, batch_size):
   """Run a bunch of trials and save everything in a dictionary.
-  
-  Args: 
+
+  Args:
     batched_run_fun: function for running rnn in batch with signature either
       inputs -> hiddens, outputs OR
       inputs, h0s -> hiddens, outputs
-    io_fun: function for creating inputs, targets, masks 
-      and initial conditions. initial conditions may be None and the parameter 
-      is used.  
+    io_fun: function for creating inputs, targets, masks
+      and initial conditions. initial conditions may be None and the parameter
+      is used.
     nbatches: Number of batches to run
     batch_size: Size of batch to run
 
-  Returns: 
-    A dictionary with the trial structure, keys are: 
+  Returns:
+    A dictionary with the trial structure, keys are:
       inputs, hiddens, outputs and targets, each an np array with dim
-      nbatches*batch_size * ntimesteps * dim 
+      nbatches*batch_size * ntimesteps * dim
   """
   inputs = []
   hiddens = []
@@ -258,15 +314,15 @@ def run_trials(batched_run_fun, io_fun, nbatches, batch_size):
     if h0s_b is None:
       h_b, o_b = batched_run_fun(input_b)
     else:
-      h_b, o_b = batched_run_fun(input_b, h0s_b)      
+      h_b, o_b = batched_run_fun(input_b, h0s_b)
       h0s.append(h0s_b)
-      
+
     inputs.append(input_b)
     hiddens.append(h_b)
     outputs.append(o_b)
     targets.append(target_b)
 
-    
+
   trial_dict = {'inputs' : onp.vstack(inputs), 'hiddens' : onp.vstack(hiddens),
                 'outputs' : onp.vstack(outputs), 'targets' : onp.vstack(targets)}
   if h0s_b is not None:
@@ -279,31 +335,31 @@ def run_trials(batched_run_fun, io_fun, nbatches, batch_size):
 def plot_params(params):
   """Plot the parameters of the GRU.
 
-  Args: 
+  Args:
     params: Parmeters of the GRU
   """
   plt.figure(figsize=(16,8))
   plt.subplot(231)
   plt.stem(params['wO'][0,:])
   plt.title('wO - output weights')
-  
+
   plt.subplot(232)
   plt.stem(params['h0'])
   plt.title('h0 - initial hidden state')
-  
+
   plt.subplot(233)
   plt.imshow(params['wRUHX'], interpolation=None)
   plt.title('wRUHX - recurrent weights')
   plt.colorbar()
-  
+
   plt.subplot(234)
   plt.imshow(params['wCHX'], interpolation=None)
   plt.title('wCHX')
-  
+
   plt.subplot(235)
   plt.stem(params['bRU'])
   plt.title('bRU - recurrent biases')
-  
+
   plt.subplot(236)
   xdim = 1
   rnn_fun_h = lambda h : gru(params, h, np.zeros(xdim))
@@ -318,11 +374,11 @@ def plot_params(params):
   plt.ylabel('Imaginary($\lambda$)')
   plt.title('Eigenvalues of $dF/dh(h_0)$')
 
-  
+
 def plot_examples(ntimesteps, rnn_internals, nexamples=1):
   """Plot some input/hidden/output triplets.
-  
-  Args: 
+
+  Args:
     ntimesteps: Number of time steps to plot
     rnn_internals: dict returned by run_trials.
   """
@@ -334,7 +390,7 @@ def plot_examples(ntimesteps, rnn_internals, nexamples=1):
     plt.title('Example %d' % (bidx))
     if bidx == 0:
       plt.ylabel('Input')
-      
+
   ntoplot = 10
   closeness = 0.25
   for bidx in range(nexamples):
@@ -344,11 +400,11 @@ def plot_examples(ntimesteps, rnn_internals, nexamples=1):
     plt.xlim([0, ntimesteps])
     if bidx == 0:
       plt.ylabel('Hidden Units')
-      
+
   for bidx in range(nexamples):
     plt.subplot(3, nexamples, 2*nexamples+bidx+1)
     plt.plot(rnn_internals['outputs'][bidx,:,:], 'r')
-    plt.plot(rnn_internals['targets'][bidx,:,:], 'k')    
+    plt.plot(rnn_internals['targets'][bidx,:,:], 'k')
     plt.xlim([0, ntimesteps])
     plt.xlabel('Timesteps')
     if bidx == 0:
