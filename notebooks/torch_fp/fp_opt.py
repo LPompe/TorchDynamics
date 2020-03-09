@@ -1,18 +1,20 @@
 import torch
 import time
 
+from scipy.spatial.distance import pdist, squareform
+
 def vprint(t, v):
     if v:
         print(t)
 
         
 fp_mse = torch.nn.MSELoss(reduction='none').cuda()
-        
-def find_fps(fun, candidates, params, x_star=None, verbose=True):
+        git
+def find_fps(fun, fp_candidates, params, x_star=None, verbose=True, device='cpu'):
     """
     parameters:
         fun - function of which the fixed points will be approximated
-        candidates - candidate fixed points
+        candidates - candidate fixed points, will be edited in place
         params - optimisation parameter dict, example: 
         
         {
@@ -32,13 +34,15 @@ def find_fps(fun, candidates, params, x_star=None, verbose=True):
         verbose - print info or not
         
     """
+    assert type(fp_candidates) == torch.nn.Parameter, "candidates must be torch.nn.Parameter type (also clone)"
+    
     v = verbose
     vprint("Optimising to find fixed points", v)
     
     if x_star is None:
-        x_star = torch.zeros((candidates.shape[0], 1)).cuda()
+        x_star = torch.zeros((fp_candidates.shape[0], 1)).to(device)
         
-    fp_candidates = torch.nn.Parameter(candidates.clone())
+   
     
     fp_opt = torch.optim.Adam([fp_candidates], 
                          params['step_size'],
@@ -52,6 +56,7 @@ def find_fps(fun, candidates, params, x_star=None, verbose=True):
     
     n_candidates = fp_candidates.shape[0]
     batch_start = 0
+    mse_mean = 1
     for i in range(0, params['num_batches']):
         
         
@@ -60,16 +65,17 @@ def find_fps(fun, candidates, params, x_star=None, verbose=True):
         batch_end = batch_start + params['batch_size']
         
             
-        batch = fp_candidates[batch_start:batch_end]
+        batch = fp_candidates[batch_start:batch_end].to(device)
         
         h_new = fun(x_star[batch_start:batch_end], batch)
         fp_loss = fp_mse(h_new, batch)
 
         mse = torch.mean(fp_loss)
+        mse_mean += mse / i
         
-        if mse < params['fp_opt_stop_tol']:
-            print('Stopping tolerance {} reached'.format(params['fp_opt_stop_tol']))
-            break
+        #if mse_mean < params['fp_opt_stop_tol']:
+        #    print('Stopping tolerance {} reached'.format(params['fp_opt_stop_tol']))
+        #    break
             
 
         mse.backward()
@@ -86,7 +92,7 @@ def find_fps(fun, candidates, params, x_star=None, verbose=True):
         else:
             batch_start = batch_end
             
-    fixed_points, indices = clean_fps(x_star, fun, fp_candidates, params)
+    fixed_points = clean_fps(x_star, fun, fp_candidates, params)
     loss = torch.mean(fp_mse(fun(x_star[indices], fixed_points), fixed_points), dim=1)
     
     return fixed_points.detach(), indices, loss.detach() 
@@ -95,24 +101,55 @@ def find_fps(fun, candidates, params, x_star=None, verbose=True):
 def clean_fps(x_star, fun, fps, params):
     
     kept_indcs = torch.arange(len(fps))
-    speed_cond = check_speed(x_star, fun, fps, params['fp_tol'])
-    kept_indcs = kept_indcs[speed_cond]
-    
-
+    speed_idcs = check_speed(x_star, fun, fps, params['fp_tol'])
+    kept_idcs = kept_idcs[speed_idcs]
     
     
+    speed_idcs = check_unique(kept_fps, params['unique_tol'])
+    kept_idcs = kept_idcs[speed_idcs]
     
-    return fps[kept_indcs], kept_indcs
+    outlier_fps = check_outlier(kept_fps, params['fp_outlier_tol'])
+    kept_idcs = kept_idcs[outlier_fps]
+    
+    
+    return fps[kept_indcs]
     
 def check_speed(x_star, fun, fps, tol):
     updated = fun(x_star, fps)
     speed = torch.mean(fp_mse(updated,fps), dim=1)
-    return (speed > tol)
+    return torch.where(speed > tol)
+    
+def check_unique(fps, loss_fun, tol):
+    
+    nfps = fps.shape[0]
+    example_idxs = torch.arange(nfps)
+    all_drop_idxs = []
+  
+    distances = torch.cdist(fps, fps)
+    
+    for fidx in range(nfps-1):
+        distances_f = distances[fidx, fidx+1:]
+        drop_idxs = example_idxs[fidx+1:][distances_f <= identical_tol]
+        all_drop_idxs += list(drop_idxs)
+        
+    unique_dropidxs = np.unique(all_drop_idxs)
+    keep_idcs = np.setdiff1d(example_idxs, unique_dropidxs)
+    
+    #if keep_idxs.shape[0] > 0:
+        #unique_fps = fps[keep_idxs, :]
+    #else:
+        #unique_fps = onp.array([], dtype=onp.int64)
+    
+    return keep_idcs
     
 def check_outlier(fps, tol):
-    return (fps > tol)
     
-def check_unique(fps, tol):
-    pass
-    #todo
+    distances = torch.cdist(fps, fps)
+    
+    nn, _ = torch.topk(distances, 1)
+    
+    keep_idcs = torch.where(nn < tol)
+    
+    return keep_idcs
+    
     
