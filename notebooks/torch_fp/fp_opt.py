@@ -9,7 +9,6 @@ def vprint(t, v):
 
         
 fp_mse = torch.nn.MSELoss(reduction='none').cuda()
-        git
 def find_fps(fun, fp_candidates, params, x_star=None, verbose=True, device='cpu'):
     """
     parameters:
