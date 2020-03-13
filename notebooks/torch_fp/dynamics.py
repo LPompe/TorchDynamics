@@ -8,7 +8,7 @@ Created on Mon Mar  9 14:45:28 2020
 import torch
 
 
-def get_jacobian(net, x, noutputs):
+def compute_jacobians(net, x, noutputs):
     x = x.squeeze()
     n = x.size()[0]
     x = x.repeat(noutputs, 1)
