@@ -51,8 +51,8 @@ def find_fps(fun, fp_candidates, params, x_star=None, verbose=True, device='cpu'
                          params['adam_eps'],
                          )
     
-    lr_lambda = lambda x: params['decay_factor']
-    lr_annealler = torch.optim.lr_scheduler.MultiplicativeLR(fp_opt, lr_lambda, last_epoch=-1)
+    lr_lambda = lambda x: params['decay_factor'] ** x
+    lr_annealler = torch.optim.lr_scheduler.LambdaLR(fp_opt, lr_lambda, last_epoch=-1)
     
     
     
